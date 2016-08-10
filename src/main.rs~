@@ -1,0 +1,24 @@
+extern crate password_manager;
+
+use password_manager::Keychain;
+
+fn main() {
+
+
+    let mut kc: Keychain = Keychain::init("a8992333");
+    //kc.print_keys();
+
+
+    kc.set("google.com".to_string(), "don'thurtme".to_string());
+    kc.set("reddit.com".to_string(), "dothedeew".to_string());
+    kc.set("google.com".to_string(), "dontstopmenow".to_string());
+    //println!("{}", kc.get("whereuat.com".to_string()).unwrap());
+    println!("{}", kc.get("google.com".to_string()).unwrap());
+    println!("{}", kc.get("reddit.com".to_string()).unwrap());
+
+    if let Some(x) = kc.get("yodog.com".to_string())
+    { println!("{}", x); }
+
+    println!("{}", kc.dump());
+
+}

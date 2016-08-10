@@ -1,0 +1,219 @@
+extern crate crypto;
+extern crate rand;
+extern crate rustc_serialize;
+
+use std::collections::HashMap;
+use std::iter;
+
+use crypto::pbkdf2;
+use crypto::hmac::Hmac;
+use crypto::mac::Mac;
+use crypto::sha2::Sha256;
+use crypto::digest::Digest;
+use crypto::aes::KeySize;
+use crypto::aes_gcm::AesGcm;
+use crypto::aead::{AeadEncryptor, AeadDecryptor};
+
+use rand::{OsRng, Rng};
+
+use rustc_serialize::json;
+
+pub struct Keychain {
+    enc_key: [u8; 32],
+    dm_encoder1: Hmac<Sha256>,
+    dm_encoder2: Hmac<Sha256>,
+    dm_encoder3: Hmac<Sha256>,
+    secure_map: HashMap<Vec<u8>, Vec<u8>>,
+    ready: bool,
+    domain_salts: HashMap<Vec<u8>, Vec<u8>>,
+    password_salts: HashMap<Vec<u8>, Vec<u8>>,
+    master_salt: Vec<u8>,
+    rng: OsRng,
+}
+
+struct KeyGen {
+    master_key: Vec<u8>,
+    master_hasher: Sha256,
+    key_count: u8,
+}
+
+impl KeyGen {
+    fn new(password: &str, salt: &Vec<u8>) -> KeyGen {
+
+        let hasher = Sha256::new();
+        let mut hmac = Hmac::new(hasher, password.as_bytes());
+        let mut master: [u8; 32] = [0u8; 32];
+        
+        pbkdf2::pbkdf2(&mut hmac, &salt[..], 10000, &mut master);
+
+        KeyGen {
+            master_key: master.iter().cloned().collect::<Vec<u8>>(),
+            master_hasher: hasher,
+            key_count: 0,
+        }
+    }
+}
+
+impl Iterator for KeyGen {
+    type Item = [u8; 32];
+
+    fn next(&mut self) -> Option<[u8; 32]> {
+        let mut next_key: [u8; 32] = [0; 32];
+        self.master_hasher.reset();
+        self.master_key.push(self.key_count);
+        self.master_hasher.input(&self.master_key[..]);
+        self.master_hasher.result(&mut next_key);
+        self.master_key.pop();
+        self.key_count += 1;
+        Some(next_key)
+    }
+}
+
+impl Keychain {
+
+    pub fn init(password: &str) -> Keychain {
+
+        let mut g: OsRng = OsRng::new().unwrap();
+        let salt: Vec<u8> = g.gen_iter().take(16).collect::<Vec<u8>>();
+        let mut kg: KeyGen = KeyGen::new(password, &salt);
+
+        let kc = Keychain {
+            enc_key: kg.next().unwrap(),
+            dm_encoder1: Hmac::new(Sha256::new(), &kg.next().unwrap()),
+            dm_encoder2: Hmac::new(Sha256::new(), &kg.next().unwrap()),
+            dm_encoder3: Hmac::new(Sha256::new(), &kg.next().unwrap()),
+            secure_map: HashMap::new(),
+            ready: true,
+            domain_salts: HashMap::new(),
+            password_salts: HashMap::new(),
+            master_salt: salt,
+            rng: g,
+        };
+        
+        kc
+    }
+
+    fn domain_found(&mut self, domain: String) -> bool {
+        let mut dm_salt_key: Vec<u8> = vec![0; 32];
+        set_encoded_dm(&mut self.dm_encoder2, &domain.into_bytes(),
+                       &mut dm_salt_key);
+        
+        match self.domain_salts.get(&dm_salt_key) {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    pub fn get(&mut self, domain: String) -> Option<String> {
+        if !self.ready { return None; }
+
+        if !self.domain_found(domain.clone()) { return None; }
+
+        let mut dm_salt_key: Vec<u8> = vec![0; 32];
+        set_encoded_dm(&mut self.dm_encoder2, &(domain.clone().into_bytes()),
+                       &mut dm_salt_key);
+
+        let mut pw_salt_key: Vec<u8> = vec![0; 32];
+        set_encoded_dm(&mut self.dm_encoder3, &(domain.clone().into_bytes()),
+                       &mut pw_salt_key);
+
+        let dm_salt: &Vec<u8> = self.domain_salts.get(&dm_salt_key).unwrap();
+        let pw_salt: &Vec<u8> = self.password_salts.get(&pw_salt_key).unwrap();
+        
+        let mut dm_salted: Vec<u8> = domain.into_bytes();
+        dm_salted.extend(dm_salt.iter().cloned());
+        
+        let mut encoded_dm: Vec<u8> = vec![0; 32];
+        set_encoded_dm(&mut self.dm_encoder1, &dm_salted, &mut encoded_dm);
+        
+        let mut encoded_pw: Vec<u8> = match self.secure_map.get(&encoded_dm) {
+            Some(epw) => epw.clone(),
+            None => vec![0; 1],
+        };
+
+        let mut decoded_pw: Vec<u8> = Vec::new();
+        set_decoded_pt(&self.enc_key, &pw_salt, &mut encoded_pw, &mut decoded_pw);
+        
+        Some(String::from_utf8(decoded_pw).unwrap())
+    }
+
+    pub fn set(&mut self, domain: String, password: String) {
+        if !self.ready { return; }
+        
+        let pw_salt: Vec<u8> = self.rng.gen_iter().take(12).collect::<Vec<u8>>();
+        let dm_salt: Vec<u8> = self.rng.gen_iter().take(16).collect::<Vec<u8>>();
+
+        let mut dm_salted: Vec<u8> = domain.clone().into_bytes();
+        dm_salted.extend(dm_salt.iter().cloned());
+
+        let mut encoded_dm1: Vec<u8> = vec![0; 32];
+        set_encoded_dm(&mut self.dm_encoder1, &dm_salted, &mut encoded_dm1);
+
+        let mut encoded_dm2: Vec<u8> = vec![0; 32];
+        set_encoded_dm(&mut self.dm_encoder2, &(domain.clone().into_bytes()),
+                       &mut encoded_dm2);
+
+        let mut encoded_dm3: Vec<u8> = vec![0; 32];
+        set_encoded_dm(&mut self.dm_encoder3, &(domain.clone().into_bytes()),
+                       &mut encoded_dm3);
+
+        let mut encoded_pw: Vec<u8> = iter::repeat(0).take(password.len()).collect();
+        set_encoded_ct(&self.enc_key, &pw_salt, password, &mut encoded_pw);
+        
+        self.secure_map.insert(encoded_dm1, encoded_pw);
+        self.domain_salts.insert(encoded_dm2, dm_salt);
+        self.password_salts.insert(encoded_dm3, pw_salt);
+    }
+
+    pub fn dump(&mut self) -> String {
+        //let mut map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        let (mut k1, mut v1) = (vec![1; 32], vec![2;32]);
+        //map.insert(k1, v1);
+        let mut map: HashMap<Vec<u8>, String> = HashMap::new();
+        map.insert(v1, "hey".to_string());
+        json::encode(&map).unwrap()
+        //"hey".to_string()
+    }
+}
+
+fn serializable_map(vec_map: HashMap<Vec<u8>, Vec<u8>>) -> HashMap<String, Vec<u8> {
+
+}
+
+fn set_decoded_pt(key: &[u8; 32], salt: &Vec<u8>,
+                  cipher_text: &mut Vec<u8>, plain_text: &mut Vec<u8>) {
+
+    let cipher_and_tag_len = cipher_text.len();
+    let a_tag: Vec<u8> = cipher_text.split_off(cipher_and_tag_len - 16);
+    plain_text.extend(iter::repeat(0).take(cipher_text.len()).collect::<Vec<u8>>());
+    
+    let aad: [u8; 32] = [0; 32];
+    let mut decipher = AesGcm::new(KeySize::KeySize256, key, &salt[..], &aad[..]);
+
+    let result = decipher.decrypt(&cipher_text[..], &mut plain_text[..], &a_tag[..]);
+}
+
+fn set_encoded_ct(key: &[u8; 32], salt: &Vec<u8>,
+                  plain_text: String, cipher_text: &mut Vec<u8>) {
+    
+    let aad: [u8; 32] = [0; 32];
+    let mut a_tag: Vec<u8> = iter::repeat(0).take(16).collect();
+    let mut cipher = AesGcm::new(KeySize::KeySize256, key, &salt[..], &aad[..]);
+
+    cipher.encrypt(&plain_text.as_bytes()[..], &mut cipher_text[..], &mut a_tag[..]);
+    cipher_text.extend(a_tag);
+}
+
+fn set_encoded_dm(encoder: &mut Hmac<Sha256>, dm: &Vec<u8>, encoded_dm: &mut Vec<u8>) {
+    encoder.input(&dm[..]);
+    encoder.raw_result(&mut encoded_dm[..]);
+    encoder.reset();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+    }
+}
+

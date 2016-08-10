@@ -1,0 +1,9 @@
+[package]
+name = "password_manager"
+version = "0.1.0"
+authors = ["Steve Bradley <stevebradley@gmail.com>"]
+
+[dependencies]
+rust-crypto = "^0.2"
+rand = "0.3"
+rustc-serialize = "0.3"
