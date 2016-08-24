@@ -10,4 +10,4 @@ or load one by calling Keychain::load(password, json_keychain_representation).</
 <p>See main.rs for example usage.</p>
 
 <h3>What's happening here?</h3>
-<p>A master password is read once and then fed into PBKFD2. This secure key is used to create other secure keys for each (domain, password) being stored. The password is encrypted under AES GCM, while the domain, combined with a salt, is Sha256-hashed.</p>
+<p>A master password is read once and then fed into PBKDF2. This secure key is used to create other secure keys for each (domain, password) being stored. The password is encrypted under AES GCM, while the domain, combined with a salt, is Sha256-hashed.</p>
