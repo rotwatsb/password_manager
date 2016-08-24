@@ -4,7 +4,7 @@
 <p>Create keychain with initial password by calling Keychain::init(password),
 or load one by calling Keychain::load(password, json_keychain_representation).</p>
 <p>Add new password with keychain.set(domain, password)</p>
-<p>Retreive saved password with keychain.get(domain)</p>
+<p>Retrieve saved password with keychain.get(domain)</p>
 <p>Remove with keychain.remove(domain)</p>
 
 <p>See main.rs for example usage.</p>
